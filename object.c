@@ -250,9 +250,13 @@ int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_
     size_t data_len = (size_t)fsize - header_len - 1;
     if (data_len != parsed_size) { free(buffer); return -1; }
 
-    void *data_copy = malloc(data_len ? data_len : 1);
+    // Allocate one extra byte and null-terminate, so callers can safely
+    // treat the data as a C string (commit_parse uses strchr/sscanf).
+    // The reported length (*len_out) still excludes this terminator.
+    void *data_copy = malloc(data_len + 1);
     if (!data_copy) { free(buffer); return -1; }
     if (data_len > 0) memcpy(data_copy, nul + 1, data_len);
+    ((char *)data_copy)[data_len] = '\0';
 
     free(buffer);
     *data_out = data_copy;
