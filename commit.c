@@ -194,8 +194,42 @@ int head_update(const ObjectID *new_commit) {
 //
 // Returns 0 on success, -1 on error.
 int commit_create(const char *message, ObjectID *commit_id_out) {
-    // TODO: Implement commit creation
-    // (See Lab Appendix for logical steps)
-    (void)message; (void)commit_id_out;
-    return -1;
+    Commit commit;
+    memset(&commit, 0, sizeof(commit));
+
+    // 1. Build the tree from the staged index (NOT from the working dir).
+    //    Commits snapshot what was staged, not what's currently on disk.
+    if (tree_from_index(&commit.tree) != 0) {
+        fprintf(stderr, "error: failed to build tree from index\n");
+        return -1;
+    }
+
+    // 2. Parent = whatever HEAD currently points to. If HEAD can't be
+    //    resolved (empty repo, first commit), that's fine — no parent.
+    if (head_read(&commit.parent) == 0) {
+        commit.has_parent = 1;
+    } else {
+        commit.has_parent = 0;
+    }
+
+    // 3. Author, timestamp, message.
+    snprintf(commit.author, sizeof(commit.author), "%s", pes_author());
+    commit.timestamp = (uint64_t)time(NULL);
+    snprintf(commit.message, sizeof(commit.message), "%s", message);
+
+    // 4. Serialize and write as OBJ_COMMIT, get its hash back.
+    void *data;
+    size_t data_len;
+    if (commit_serialize(&commit, &data, &data_len) != 0) return -1;
+
+    ObjectID commit_id;
+    int rc = object_write(OBJ_COMMIT, data, data_len, &commit_id);
+    free(data);
+    if (rc != 0) return -1;
+
+    // 5. Move the branch pointer to the new commit.
+    if (head_update(&commit_id) != 0) return -1;
+
+    if (commit_id_out) *commit_id_out = commit_id;
+    return 0;
 }
