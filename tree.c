@@ -10,6 +10,7 @@
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
+#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -129,9 +130,76 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+// Forward declaration (implemented in object.c).
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
+// Recursive helper: builds one tree object covering index entries [start, end)
+// that all share `prefix_len` bytes of common path prefix. Writes the tree
+// to the object store and returns its hash via id_out.
+static int build_tree(const Index *idx, int start, int end,
+                      size_t prefix_len, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+
+    int i = start;
+    while (i < end) {
+        const char *path = idx->entries[i].path;
+        const char *rest = path + prefix_len;       // path segment below this dir
+        const char *slash = strchr(rest, '/');
+
+        if (!slash) {
+            // Plain file at this level → add a blob entry
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = idx->entries[i].mode;
+            e->hash = idx->entries[i].hash;
+            snprintf(e->name, sizeof(e->name), "%s", rest);
+            i++;
+        } else {
+            // Subdirectory. Group contiguous entries that continue into
+            // the same child directory.
+            size_t child_name_len = (size_t)(slash - rest);
+            size_t child_prefix_len = prefix_len + child_name_len + 1; // include '/'
+
+            int group_start = i;
+            int j = i + 1;
+            while (j < end) {
+                const char *p = idx->entries[j].path;
+                if (strlen(p) < child_prefix_len) break;
+                if (memcmp(p, idx->entries[group_start].path, child_prefix_len) != 0) break;
+                j++;
+            }
+
+            // Recurse to build the subtree
+            ObjectID sub_id;
+            if (build_tree(idx, group_start, j, child_prefix_len, &sub_id) != 0)
+                return -1;
+
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = 0040000;        // directory mode
+            e->hash = sub_id;
+            if (child_name_len >= sizeof(e->name)) return -1;
+            memcpy(e->name, rest, child_name_len);
+            e->name[child_name_len] = '\0';
+
+            i = j;
+        }
+
+        if (tree.count >= MAX_TREE_ENTRIES) return -1;
+    }
+
+    // Serialize this tree and write it to the object store.
+    void *serialized;
+    size_t serialized_len;
+    if (tree_serialize(&tree, &serialized, &serialized_len) != 0) return -1;
+
+    int rc = object_write(OBJ_TREE, serialized, serialized_len, id_out);
+    free(serialized);
+    return rc;
+}
+
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    Index idx;
+    if (index_load(&idx) != 0) return -1;
+
+    return build_tree(&idx, 0, idx.count, 0, id_out);
 }
